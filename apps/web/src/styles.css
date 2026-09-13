@@ -4188,7 +4188,7 @@ html.tauri #root {
 .ssh-config-edit svg {
   color: var(--fg-dim);
 }
-.ssh-manager-backdrop { z-index: 100; padding: 24px; }
+.ssh-manager-backdrop { z-index: 150; padding: 24px; }
 .ssh-manager-dialog { width: min(680px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 48px)); display: flex; flex-direction: column; overflow: hidden; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 24px 72px rgba(0,0,0,.42); }
 .ssh-manager-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; }
 .ssh-manager-header h2 { margin: 0; font-size: 16px; font-weight: 400; color: var(--fg); }

@@ -180,7 +180,9 @@ class Runtime {
 
   static async create(paneId: string, agent: AgentConfig, cwd: string): Promise<Runtime> {
     const spec = agent.runtime;
-    if (!spec || spec.protocol !== "acp") throw new Error(`${agent.name} has no ACP runtime configured`);
+    if (!spec || (spec.protocol !== "acp" && spec.protocol !== "acp-ssh")) {
+      throw new Error(`${agent.name} has no ACP runtime configured`);
+    }
     if (spec.modelSource === "termany") {
       throw new Error("Termany model routing for ACP runtimes is not available yet; choose Agent-managed models");
     }
@@ -192,7 +194,15 @@ class Runtime {
     let env = subscriptionEnvironment(await spawnEnvironment(), agent);
     let command: string;
     let args: string[];
-    if (spec.distribution === "managed") {
+
+    if (spec.protocol === "acp-ssh") {
+      // SSH remote agent
+      const { sshArgsForConnection } = await import("./ssh.js");
+      const sshArgs = sshArgsForConnection(spec.sshTarget);
+      const remoteCommand = spec.args ? `${spec.command} ${spec.args}` : spec.command;
+      command = "ssh";
+      args = [...sshArgs, remoteCommand];
+    } else if (spec.distribution === "managed") {
       const launch = await prepareManagedAcpLaunch(agent, env, splitArgs(spec.args));
       command = launch.command;
       args = launch.args;
@@ -201,8 +211,12 @@ class Runtime {
       command = await executablePath(spec.command);
       args = splitArgs(spec.args);
     }
-    await checkGeminiAuthSupport(agent, env);
-    await checkNativeAcpSupport(agent, command, env);
+
+    if (spec.protocol === "acp") {
+      await checkGeminiAuthSupport(agent, env);
+      await checkNativeAcpSupport(agent, command, env);
+    }
+
     const dropped = overriddenCredentials(agent).filter((name) => name in process.env);
     if (dropped.length) {
       console.log(`[termany] ${agent.name}: using its own login, ignoring ${dropped.join(", ")}`);

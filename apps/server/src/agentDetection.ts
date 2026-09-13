@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import type { AgentConfig } from "./agentConfig.js";
 import { checkGeminiAuthSupport } from "./geminiAuth.js";
 import { managedAcpAdapterPath, managedAcpDefinition } from "./managedAcp.js";
 import { checkNativeAcpSupport } from "./nativeAcp.js";
 import { resolveExecutable, spawnEnvironment } from "./shellPath.js";
+import { sshArgsForConnection } from "./ssh.js";
 
 export type AgentDetection = {
   id?: string;
@@ -33,6 +35,14 @@ export function parseAgentDetectionInput(input: unknown): AgentConfig | undefine
         endpoint: String(rawRuntime.endpoint).trim().replace(/\/+$/, ""),
         apiKey: String(rawRuntime.apiKey ?? "").trim(),
       }
+    : rawRuntime?.protocol === "acp-ssh" && String(rawRuntime.sshTarget ?? "").trim() && String(rawRuntime.command ?? "").trim()
+    ? {
+        protocol: "acp-ssh" as const,
+        sshTarget: String(rawRuntime.sshTarget).trim(),
+        command: String(rawRuntime.command).trim(),
+        args: String(rawRuntime.args ?? "").trim(),
+        modelSource: rawRuntime.modelSource === "termany" ? "termany" as const : "agent" as const,
+      }
     : rawRuntime?.protocol === "acp" && String(rawRuntime.command ?? "").trim() ? {
         protocol: "acp" as const,
         command: String(rawRuntime.command).trim(),
@@ -61,6 +71,65 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Re
     return await fetch(url, { ...init, signal: controller.signal, redirect: "error" });
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function detectSshAcp(agent: AgentConfig): Promise<AgentDetection> {
+  const runtime = agent.runtime;
+  if (!runtime || runtime.protocol !== "acp-ssh") {
+    return { id: agent.id, command: agent.command, installed: false };
+  }
+  const sshTarget = runtime.sshTarget;
+  const command = runtime.command;
+  const result = { id: agent.id, command: `${sshTarget}:${command}`, path: sshTarget };
+
+  try {
+    const sshArgs = sshArgsForConnection(sshTarget);
+    const executable = firstShellToken(command) || command.split(/\s+/)[0] || command;
+    if (!executable || /[`$\\;|&<>(){}!]/.test(executable)) {
+      return { ...result, installed: false, error: "Remote command is not a safe executable name" };
+    }
+    const testCommand = `command -v ${JSON.stringify(executable)} >/dev/null 2>&1 && echo OK || echo NOT_FOUND`;
+
+    return await new Promise((resolve) => {
+      const ssh = spawn("ssh", [
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        ...sshArgs,
+        testCommand,
+      ]);
+
+      let output = "";
+      const timer = setTimeout(() => {
+        ssh.kill("SIGKILL");
+      }, 8_000);
+
+      ssh.stdout?.on("data", (data: Buffer) => {
+        output += data.toString();
+      });
+
+      ssh.on("close", (code: number) => {
+        clearTimeout(timer);
+        if (code === 0 && output.trim() === "OK") {
+          resolve({ ...result, installed: true });
+        } else if (output.trim() === "NOT_FOUND") {
+          resolve({ ...result, installed: false, error: `Command '${command}' not found on remote host` });
+        } else {
+          resolve({ ...result, installed: false, error: "SSH connection failed or command check failed" });
+        }
+      });
+
+      ssh.on("error", (error: Error) => {
+        clearTimeout(timer);
+        resolve({ ...result, installed: false, error: error.message });
+      });
+    });
+  } catch (error) {
+    return {
+      ...result,
+      installed: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -124,6 +193,9 @@ export async function detectAgentExecutable(
   };
   if (agent.runtime?.protocol === "acp-http") {
     return { ...await detectHttpAcp(agent, env), ...terminalResult };
+  }
+  if (agent.runtime?.protocol === "acp-ssh") {
+    return { ...await detectSshAcp(agent), ...terminalResult };
   }
   if (agent.runtime?.protocol === "acp" && agent.runtime.distribution === "managed") {
     const definition = managedAcpDefinition(agent.id);

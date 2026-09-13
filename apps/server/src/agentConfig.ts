@@ -14,6 +14,12 @@ export type AgentRuntimeConfig = {
   protocol: "acp-http";
   endpoint: string;
   apiKey: string;
+} | {
+  protocol: "acp-ssh";
+  sshTarget: string;
+  command: string;
+  args: string;
+  modelSource: AgentModelSource;
 };
 
 export interface AgentConfig {
@@ -106,6 +112,18 @@ function runtime(input: any): AgentRuntimeConfig | undefined {
     const endpoint = String(input.endpoint ?? "").trim().replace(/\/+$/, "");
     if (!/^https?:\/\//i.test(endpoint)) return undefined;
     return { protocol: "acp-http", endpoint, apiKey: String(input.apiKey ?? "").trim() };
+  }
+  if (input.protocol === "acp-ssh") {
+    const sshTarget = String(input.sshTarget ?? "").trim();
+    const command = String(input.command ?? "").trim();
+    if (!sshTarget || !command) return undefined;
+    return {
+      protocol: "acp-ssh",
+      sshTarget,
+      command,
+      args: String(input.args ?? "").trim(),
+      modelSource: input.modelSource === "termany" ? "termany" : "agent",
+    };
   }
   if (input.protocol !== "acp") return undefined;
   const command = String(input.command ?? "").trim();

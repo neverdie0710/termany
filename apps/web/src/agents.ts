@@ -54,6 +54,12 @@ export type AgentRuntimeConfig = {
   protocol: "acp-http";
   endpoint: string;
   apiKey: string;
+} | {
+  protocol: "acp-ssh";
+  sshTarget: string;
+  command: string;
+  args: string;
+  modelSource: "termany" | "agent";
 };
 
 type StoredAgentConfig = Partial<Omit<AgentConfig,

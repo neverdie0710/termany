@@ -9,6 +9,17 @@ export type AgentRuntimeConfig = {
   protocol: "acp-http";
   endpoint: string;
   apiKey: string;
+} | {
+  /** Remote agent over SSH connection. */
+  protocol: "acp-ssh";
+  /** SSH connection target (profile:id or direct host string). */
+  sshTarget: string;
+  /** Command to run on remote host. */
+  command: string;
+  /** Arguments for the command. */
+  args: string;
+  /** Model source (termany or agent). */
+  modelSource: "termany" | "agent";
 };
 
 export const AGENT_RUNTIME_REVISION = 6;

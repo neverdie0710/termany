@@ -1,6 +1,8 @@
 import { textInputProps } from "../textInputProps";
+import { apiPath } from "../api";
 import { isAgentAvailableForBot } from "../agentAvailability";
-import { botNameAfterAgentSelection } from "../agentBotName";
+import { suggestedBotName } from "../agentBotName";
+import { agentSupportsRemote, buildRemoteAgent, findMatchingRemoteAgent, remoteRuntimeForAgent } from "../remoteAgent";
 import {
   PointerEvent as ReactPointerEvent,
   useCallback,
@@ -14,7 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { UserRound } from "lucide-react";
-import { agentCommand, detectAgentConfigs, useAgentConfigs, type AgentConfig } from "../agents";
+import { agentCommand, detectAgentConfigs, loadAgentConfigs, saveAgentConfigs, useAgentConfigs, type AgentConfig } from "../agents";
 import termanyIcon from "../assets/agents/termany.png?url";
 import { compareConversationActivity, lastConversationTime } from "../agentConversationOrder";
 import { compareConversationOrganization, conversationMoveUpdates } from "../agentConversationOrganization";
@@ -29,8 +31,10 @@ import { fetchConfiguredDefaultModel } from "../modelConfig";
 import { useNativeOccluder } from "../nativeViewOcclusion";
 import { useStore, type AgentConversation } from "../state/store";
 import { AgentPane } from "./AgentPane";
+import { AgentCreateSelect, type AgentCreateChoice } from "./AgentCreateSelect";
 import { AgentLauncher } from "./AgentLauncher";
 import { AgentGroupDialog } from "./AgentGroupDialog";
+import { SshManagerDialog } from "./SshManagerDialog";
 import { AgentAvatar, AgentAvatarEditor } from "./AgentIdentityFields";
 import {
   AgentIcon,
@@ -43,6 +47,8 @@ import {
   EditIcon,
   FilterIcon,
   GearIcon,
+  SshIcon,
+  TerminalIcon,
   GroupChatIcon,
   MarkAllReadIcon,
   MoreIcon,
@@ -159,14 +165,14 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   );
   const [composerName, setComposerName] = useState("");
   const [composerRuntime, setComposerRuntime] = useState("");
-  const [runtimeSelectOpen, setRuntimeSelectOpen] = useState(false);
-  const [runtimeSelectIndex, setRuntimeSelectIndex] = useState(0);
-  const [runtimeSelectMenuPosition, setRuntimeSelectMenuPosition] = useState<{
-    left: number;
-    top: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
+  const [composerHost, setComposerHost] = useState("");
+  const [sshConnections, setSshConnections] = useState<Array<{
+    target: string;
+    label?: string;
+    hostname?: string;
+    profileId?: string;
+  }>>([]);
+  const [sshManagerOpen, setSshManagerOpen] = useState(false);
   const [detectedRuntimes, setDetectedRuntimes] = useState<AgentConfig[] | null>(null);
   const [termanyModel, setTermanyModel] = useState<string | null>(null);
   const [runtimeDetectionFailed, setRuntimeDetectionFailed] = useState(false);
@@ -237,10 +243,7 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
     "agent-conversation-delete",
     visible && deleteTarget !== null
   );
-  const runtimeSelectRef = useRef<HTMLDivElement>(null);
-  const runtimeSelectMenuRef = useRef<HTMLDivElement>(null);
   const composerNameInputRef = useRef<HTMLInputElement>(null);
-  const runtimeSelectId = useId();
   const nameIme = useImeGuard();
   const conversationNameIme = useImeGuard();
   const topicTitleIme = useImeGuard();
@@ -248,7 +251,7 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
 
   // Termany needs no CLI, but it is useful only after Chat mode has a valid
   // default model. Alphabetize the available choices for predictable scanning.
-  const runtimeChoices = useMemo(
+  const localRuntimeChoices = useMemo(
     () =>
       [
         ...(termanyModel ? [{
@@ -268,82 +271,85 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
       ].sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base", numeric: true })),
     [detectedRuntimes, termanyModel]
   );
+  const remoteRuntimeChoices = useMemo(
+    () =>
+      configuredRuntimes
+        .filter((agent) => agent.enabled && agentSupportsRemote(agent))
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          icon: agent.icon,
+          hint: agent.runtime && "sshTarget" in agent.runtime
+            ? agent.runtime.sshTarget
+            : agentCommand(agent),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base", numeric: true })),
+    [configuredRuntimes]
+  );
+  const runtimeChoices = composerHost ? remoteRuntimeChoices : localRuntimeChoices;
+  const selectedSourceAgent = agents.find((agent) => agent.id === composerRuntime);
+  const canUseRemote = composerRuntime !== TERMANY_RUNTIME_ID
+    && (!composerRuntime || agentSupportsRemote(selectedSourceAgent));
+  const hostChoices = useMemo(
+    () => [
+      {
+        id: "",
+        name: t("agentWorkspace.hostLocal"),
+        icon: (
+          <span className="agent-launcher-avatar">
+            <TerminalIcon />
+          </span>
+        ),
+      },
+      ...(canUseRemote
+        ? sshConnections.map((connection) => ({
+            id: connection.target,
+            name: connection.label ?? connection.hostname ?? connection.target,
+            hint: connection.hostname ?? connection.target,
+            icon: (
+              <span className="agent-launcher-avatar">
+                <SshIcon />
+              </span>
+            ),
+          }))
+        : []),
+    ],
+    [canUseRemote, sshConnections, t]
+  );
+  const composerHostChoice = hostChoices.find((choice) => choice.id === composerHost);
+  const composerHostLabel = composerHost ? composerHostChoice?.name : undefined;
 
   const composerRuntimeAvailable = runtimeChoices.some((choice) => choice.id === composerRuntime);
   const composerRuntimeChoice = runtimeChoices.find((choice) => choice.id === composerRuntime);
   const selectComposerRuntime = (choice: (typeof runtimeChoices)[number]) => {
+    const source = agents.find((agent) => agent.id === choice.id);
+    if (choice.id === TERMANY_RUNTIME_ID || (source && !agentSupportsRemote(source))) {
+      setComposerHost("");
+    }
     setComposerRuntime(choice.id);
-    setComposerName((current) => botNameAfterAgentSelection(current, choice.name));
-    setRuntimeSelectOpen(false);
+    setComposerName((current) => suggestedBotName(
+      current,
+      choice.name,
+      choice.id === TERMANY_RUNTIME_ID ? undefined : composerHostLabel
+    ));
     requestAnimationFrame(() => composerNameInputRef.current?.focus({ preventScroll: true }));
+  };
+  const selectComposerHost = (choice: AgentCreateChoice) => {
+    setComposerHost(choice.id);
+    if (choice.id && composerRuntime === TERMANY_RUNTIME_ID) {
+      setComposerRuntime("");
+    }
+    setComposerName((current) => suggestedBotName(
+      current,
+      composerRuntimeChoice?.name ?? current.trim(),
+      choice.id ? choice.name : undefined
+    ));
   };
 
   useEffect(() => {
-    if (!runtimeSelectOpen) return;
-    const closeOutside = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!runtimeSelectRef.current?.contains(target) && !runtimeSelectMenuRef.current?.contains(target)) {
-        setRuntimeSelectOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setRuntimeSelectOpen(false);
-    };
-    window.addEventListener("pointerdown", closeOutside);
-    window.addEventListener("keydown", closeOnEscape, true);
-    return () => {
-      window.removeEventListener("pointerdown", closeOutside);
-      window.removeEventListener("keydown", closeOnEscape, true);
-    };
-  }, [runtimeSelectOpen]);
-
-  useEffect(() => {
-    if (!runtimeSelectOpen) {
-      setRuntimeSelectMenuPosition(null);
-      return;
-    }
-    const positionMenu = () => {
-      const rect = runtimeSelectRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const edge = 12;
-      const gap = 6;
-      const desiredHeight = Math.min(304, runtimeChoices.length * 40 + 10);
-      const availableBelow = window.innerHeight - rect.bottom - edge - gap;
-      const availableAbove = rect.top - edge - gap;
-      const openAbove = availableBelow < Math.min(desiredHeight, 160) && availableAbove > availableBelow;
-      const available = openAbove ? availableAbove : availableBelow;
-      const maxHeight = Math.max(80, Math.min(desiredHeight, available));
-      setRuntimeSelectMenuPosition({
-        left: Math.max(edge, Math.min(rect.left, window.innerWidth - rect.width - edge)),
-        top: openAbove ? rect.top - gap - maxHeight : rect.bottom + gap,
-        width: Math.min(rect.width, window.innerWidth - edge * 2),
-        maxHeight,
-      });
-    };
-    positionMenu();
-    window.addEventListener("resize", positionMenu);
-    window.addEventListener("scroll", positionMenu, true);
-    return () => {
-      window.removeEventListener("resize", positionMenu);
-      window.removeEventListener("scroll", positionMenu, true);
-    };
-  }, [runtimeChoices.length, runtimeSelectOpen]);
-
-  useEffect(() => {
-    if (runtimeChoices.length === 0) setRuntimeSelectOpen(false);
-    setRuntimeSelectIndex(Math.max(0, runtimeChoices.findIndex((choice) => choice.id === composerRuntime)));
-  }, [composerRuntime, runtimeChoices]);
-
-  useEffect(() => {
-    if (!runtimeSelectOpen) return;
-    const frame = requestAnimationFrame(() => {
-      document.getElementById(`${runtimeSelectId}-option-${runtimeSelectIndex}`)?.scrollIntoView({ block: "nearest" });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [runtimeSelectId, runtimeSelectIndex, runtimeSelectOpen]);
+    if (canUseRemote) return;
+    setComposerHost("");
+  }, [canUseRemote]);
 
   useEffect(() => {
     if (dialogStage !== "create") return;
@@ -396,11 +402,30 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtimeSignature, dialogStage]);
 
+  const loadSshConnections = useCallback(() => {
+    const abort = new AbortController();
+    fetch(apiPath("/api/ssh/connections"), { signal: abort.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        const payload = await res.json();
+        setSshConnections(Array.isArray(payload.connections) ? payload.connections : []);
+      })
+      .catch((reason) => {
+        if (reason?.name !== "AbortError") setSshConnections([]);
+      });
+    return () => abort.abort();
+  }, []);
+
+  useEffect(() => {
+    if (dialogStage !== "create") return;
+    return loadSshConnections();
+  }, [dialogStage, loadSshConnections]);
+
   useEffect(() => {
     setDialogStage(conversations.length === 0 ? "picker" : null);
     setComposerName("");
     setComposerRuntime("");
-    setRuntimeSelectOpen(false);
+    setComposerHost("");
     setContextMenu(null);
     setFolderMenu(null);
     setTopicMenu(null);
@@ -642,6 +667,7 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
     setQuery("");
     setComposerName("");
     setComposerRuntime("");
+    setComposerHost("");
     setDialogStage(null);
     setInspectorOpen(false);
   };
@@ -653,7 +679,7 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   const openCreateDialog = () => {
     setComposerName("");
     setComposerRuntime("");
-    setRuntimeSelectOpen(false);
+    setComposerHost("");
     setDialogStage("create");
   };
 
@@ -662,7 +688,21 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   const submitConversation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!composerRuntimeAvailable) return;
-    createConversation(composerRuntime, composerName);
+    if (!composerHost) {
+      createConversation(composerRuntime, composerName);
+      return;
+    }
+    const source = selectedSourceAgent
+      ?? configuredRuntimes.find((agent) => agent.id === composerRuntime);
+    if (!source) return;
+    const runtime = remoteRuntimeForAgent(source, composerHost);
+    if (!runtime) return;
+    const existing = source.runtime?.protocol === "acp-ssh" && source.runtime.sshTarget === runtime.sshTarget
+      ? source
+      : findMatchingRemoteAgent(loadAgentConfigs(), runtime);
+    const remote = existing ?? buildRemoteAgent(source, runtime, composerHostChoice?.name ?? composerHost);
+    if (!existing) saveAgentConfigs([remote, ...loadAgentConfigs()]);
+    createConversation(remote.id, composerName);
   };
 
   const openRuntimeSettings = (agentId?: string) => {
@@ -2008,101 +2048,45 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
                   />
                 </label>
 
-                <fieldset className="agent-runtime-fieldset">
-                  <legend>
-                    <span className="agent-runtime-legend">
-                      <span>{t("agentWorkspace.selectAgent")}</span>
-                      <button type="button" className="agent-runtime-manage" onClick={() => openRuntimeSettings()}>
-                        <GearIcon />
-                        <span>{t("agentChat.manageAgents")}</span>
-                      </button>
-                    </span>
-                  </legend>
-                  <div
-                    className="agent-runtime-select"
-                    ref={runtimeSelectRef}
-                    aria-busy={detectedRuntimes === null || termanyModel === null}
-                    title={composerRuntimeChoice?.hint}
-                  >
-                    <button
-                      type="button"
-                      role="combobox"
-                      className={`agent-runtime-select-trigger ${runtimeSelectOpen ? "open" : ""}`}
-                      aria-label={t("agentWorkspace.selectAgent")}
-                      aria-haspopup="listbox"
-                      aria-expanded={runtimeSelectOpen}
-                      aria-controls={`${runtimeSelectId}-listbox`}
-                      aria-activedescendant={runtimeSelectOpen ? `${runtimeSelectId}-option-${runtimeSelectIndex}` : undefined}
-                      disabled={detectedRuntimes === null || termanyModel === null || runtimeChoices.length === 0}
-                      onClick={() => {
-                        const selected = runtimeChoices.findIndex((choice) => choice.id === composerRuntime);
-                        setRuntimeSelectIndex(selected >= 0 ? selected : 0);
-                        setRuntimeSelectOpen((open) => !open);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                          event.preventDefault();
-                          const direction = event.key === "ArrowDown" ? 1 : -1;
-                          if (!runtimeSelectOpen) {
-                            const selected = runtimeChoices.findIndex((choice) => choice.id === composerRuntime);
-                            setRuntimeSelectIndex(selected >= 0 ? selected : direction > 0 ? 0 : runtimeChoices.length - 1);
-                            setRuntimeSelectOpen(true);
-                          } else {
-                            setRuntimeSelectIndex((index) => (index + direction + runtimeChoices.length) % runtimeChoices.length);
-                          }
-                        } else if (event.key === "Enter" && runtimeSelectOpen) {
-                          event.preventDefault();
-                          const choice = runtimeChoices[runtimeSelectIndex];
-                          if (choice) selectComposerRuntime(choice);
-                        }
-                      }}
-                    >
-                      <AgentAvatar icon={composerRuntimeChoice?.icon} className="agent-launcher-avatar" />
-                      <span>{composerRuntimeChoice?.name ?? (
-                        detectedRuntimes === null || termanyModel === null
-                          ? t("agents.detecting")
-                          : runtimeChoices.length === 0
-                            ? runtimeDetectionFailed ? t("agents.detectFailed") : t("agents.noEnabled")
-                            : t("agentWorkspace.selectAgent")
-                      )}</span>
-                      <ChevronIcon dir="down" />
-                    </button>
-                    {runtimeSelectOpen && runtimeSelectMenuPosition && createPortal(
-                      <div
-                        id={`${runtimeSelectId}-listbox`}
-                        ref={runtimeSelectMenuRef}
-                        className="agent-runtime-select-menu"
-                        role="listbox"
-                        style={runtimeSelectMenuPosition}
-                      >
-                        {runtimeChoices.map((choice, index) => {
-                          const selected = choice.id === composerRuntime;
-                          return (
-                            <button
-                              id={`${runtimeSelectId}-option-${index}`}
-                              key={choice.id}
-                              type="button"
-                              role="option"
-                              aria-selected={selected}
-                              className={`agent-runtime-select-option ${index === runtimeSelectIndex ? "active" : ""}`}
-                              title={choice.hint}
-                              onMouseEnter={() => setRuntimeSelectIndex(index)}
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => selectComposerRuntime(choice)}
-                            >
-                              <AgentAvatar icon={choice.icon} className="agent-launcher-avatar" />
-                              <span>{choice.name}</span>
-                              <span className="agent-runtime-select-check" aria-hidden="true">
-                                {selected && <CheckIcon />}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>,
-                      document.body
-                    )}
-                  </div>
-                </fieldset>
+                <AgentCreateSelect
+                  label={t("agentWorkspace.selectAgent")}
+                  manageLabel={t("agentChat.manageAgents")}
+                  manageIcon={<GearIcon />}
+                  onManage={() => openRuntimeSettings()}
+                  value={composerRuntime}
+                  choices={runtimeChoices.map((choice) => ({
+                    ...choice,
+                    icon: <AgentAvatar icon={choice.icon} className="agent-launcher-avatar" />,
+                  }))}
+                  disabled={composerHost
+                    ? runtimeChoices.length === 0
+                    : detectedRuntimes === null || termanyModel === null || runtimeChoices.length === 0}
+                  placeholder={
+                    composerHost
+                      ? runtimeChoices.length === 0 ? t("agents.noEnabled") : t("agentWorkspace.selectAgent")
+                      : detectedRuntimes === null || termanyModel === null
+                        ? t("agents.detecting")
+                        : runtimeChoices.length === 0
+                          ? runtimeDetectionFailed ? t("agents.detectFailed") : t("agents.noEnabled")
+                          : t("agentWorkspace.selectAgent")
+                  }
+                  onChange={(choice) => {
+                    const selected = runtimeChoices.find((item) => item.id === choice.id);
+                    if (selected) selectComposerRuntime(selected);
+                  }}
+                />
+
+                <AgentCreateSelect
+                  label={t("agentWorkspace.selectHost")}
+                  manageLabel={t("ssh.configEdit")}
+                  manageIcon={<GearIcon />}
+                  onManage={() => setSshManagerOpen(true)}
+                  value={composerHost}
+                  choices={hostChoices}
+                  disabled={!canUseRemote && Boolean(composerRuntime)}
+                  placeholder={canUseRemote ? t("agentWorkspace.selectHost") : t("agentWorkspace.hostRemoteUnavailable")}
+                  onChange={selectComposerHost}
+                />
               </div>
               <div className="agent-create-actions">
                 <button
@@ -2125,6 +2109,14 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
         </div>,
           document.body
         )}
+      {sshManagerOpen && (
+        <SshManagerDialog
+          onClose={() => setSshManagerOpen(false)}
+          onSaved={() => {
+            loadSshConnections();
+          }}
+        />
+      )}
     </>
   );
 }

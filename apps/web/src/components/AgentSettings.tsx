@@ -1,6 +1,7 @@
 import { textInputProps } from "../textInputProps";
 import { defaultAgentRuntime } from "@termany/core";
 import { useEffect, useRef, useState } from "react";
+import { apiPath } from "../api";
 import {
   agentCommand,
   createCustomAgent,
@@ -11,6 +12,7 @@ import {
   type AgentConfig,
   type AgentRuntimeConfig,
 } from "../agents";
+import { runtimeForProtocol } from "../remoteAgent";
 import { agentInstallCommand, enableAgentAfterInstallLaunch } from "../agentInstall";
 import termanyIcon from "../assets/agents/termany.png?url";
 import { useI18n } from "../i18n";
@@ -48,6 +50,7 @@ export function AgentSettings({
   const [detectionComplete, setDetectionComplete] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [termanyModel, setTermanyModel] = useState<string | null>(null);
+  const [sshConnections, setSshConnections] = useState<Array<{ target: string; label?: string; hostname?: string }>>([]);
 
   const commit = (next: AgentConfig[]) => {
     setAgents(next);
@@ -61,6 +64,10 @@ export function AgentSettings({
   const updateRuntime = (agent: AgentConfig, patch: Record<string, unknown>) => {
     if (!agent.runtime) return;
     updateAgent(agent.id, { runtime: { ...agent.runtime, ...patch } as AgentRuntimeConfig });
+  };
+
+  const changeRuntimeProtocol = (agent: AgentConfig, protocol: AgentRuntimeConfig["protocol"]) => {
+    updateAgent(agent.id, { runtime: runtimeForProtocol(agent, protocol) });
   };
 
   const toggleRuntime = (agent: AgentConfig, enabled: boolean) => {
@@ -118,6 +125,20 @@ export function AgentSettings({
     if (!initialAgentId) return;
     initialAgentRef.current?.scrollIntoView({ block: "nearest" });
   }, [initialAgentId]);
+
+  useEffect(() => {
+    const abort = new AbortController();
+    fetch(apiPath("/api/ssh/connections"), { signal: abort.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        const payload = await res.json();
+        setSshConnections(Array.isArray(payload.connections) ? payload.connections : []);
+      })
+      .catch((reason) => {
+        if (reason?.name !== "AbortError") setSshConnections([]);
+      });
+    return () => abort.abort();
+  }, []);
 
   const addCustom = () => {
     const agent = createCustomAgent();
@@ -195,6 +216,7 @@ export function AgentSettings({
           const checkingInstall = agent.builtIn
             && agent.terminalDetected === undefined
             && !detectionComplete;
+          const sshRuntime = agent.runtime?.protocol === "acp-ssh" ? agent.runtime : undefined;
           return (
             <div
               key={agent.id}
@@ -315,9 +337,18 @@ export function AgentSettings({
                       <div className="agent-runtime-fields">
                         <label className="agent-field">
                           <span>{t("agents.runtimeProtocol")}</span>
-                          <select value={agent.runtime.protocol} disabled>
-                            <option value="acp">Agent Client Protocol (stdio)</option>
-                            <option value="acp-http">Agent Communication Protocol 0.2 (HTTP)</option>
+                          <select
+                            value={agent.runtime.protocol}
+                            disabled={agent.builtIn}
+                            onChange={(event) => changeRuntimeProtocol(agent, event.target.value as AgentRuntimeConfig["protocol"])}
+                          >
+                            <option value="acp">{t("agents.runtimeAcp")}</option>
+                            {(agent.runtime.protocol === "acp-http" || agent.id === "fastclaw") && (
+                              <option value="acp-http">{t("agents.runtimeAcpHttp")}</option>
+                            )}
+                            {(!agent.builtIn || agent.runtime.protocol === "acp-ssh") && (
+                              <option value="acp-ssh">{t("agents.runtimeAcpSsh")}</option>
+                            )}
                           </select>
                         </label>
                         {agent.runtime.protocol === "acp-http" ? (
@@ -343,6 +374,70 @@ export function AgentSettings({
                               />
                             </label>
                           </>
+                        ) : sshRuntime ? (
+                          <>
+                            <label className="agent-field">
+                              <span>{t("agents.runtimeSshTarget")}</span>
+                              <select
+                                value={sshConnections.some((connection) => connection.target === sshRuntime.sshTarget)
+                                  ? sshRuntime.sshTarget
+                                  : sshRuntime.sshTarget ? "__custom__" : ""}
+                                onChange={(event) => {
+                                  if (event.target.value === "__custom__") return;
+                                  updateRuntime(agent, { sshTarget: event.target.value });
+                                }}
+                              >
+                                <option value="">{t("agentWorkspace.selectHost")}</option>
+                                {sshConnections.map((connection) => (
+                                  <option key={connection.target} value={connection.target}>
+                                    {connection.label ?? connection.hostname ?? connection.target}
+                                  </option>
+                                ))}
+                                {sshRuntime.sshTarget
+                                  && !sshConnections.some((connection) => connection.target === sshRuntime.sshTarget)
+                                  && (
+                                    <option value="__custom__">{sshRuntime.sshTarget}</option>
+                                  )}
+                              </select>
+                            </label>
+                            {(!sshConnections.length || (sshRuntime.sshTarget && !sshConnections.some((connection) => connection.target === sshRuntime.sshTarget))) && (
+                              <label className="agent-field">
+                                <span>{t("agents.runtimeSshTarget")}</span>
+                                <input
+                                  {...textInputProps}
+                                  value={sshRuntime.sshTarget}
+                                  placeholder="profile:xxx or user@host:port"
+                                  onChange={(event) => updateRuntime(agent, { sshTarget: event.target.value })}
+                                />
+                              </label>
+                            )}
+                            <label className="agent-field">
+                              <span>{t("agents.runtimeCommand")}</span>
+                              <input
+                                {...textInputProps}
+                                value={sshRuntime.command}
+                                onChange={(event) => updateRuntime(agent, { command: event.target.value })}
+                              />
+                            </label>
+                            <label className="agent-field">
+                              <span>{t("agents.runtimeArgs")}</span>
+                              <input
+                                {...textInputProps}
+                                value={sshRuntime.args}
+                                onChange={(event) => updateRuntime(agent, { args: event.target.value })}
+                              />
+                            </label>
+                            <label className="agent-field">
+                              <span>{t("agents.runtimeModels")}</span>
+                              <select
+                                value={sshRuntime.modelSource}
+                                onChange={(event) => updateRuntime(agent, { modelSource: event.target.value })}
+                              >
+                                <option value="agent">{t("agents.runtimeModelsAgent")}</option>
+                                <option value="termany" disabled>{t("agents.runtimeModelsTermany")}</option>
+                              </select>
+                            </label>
+                          </>
                         ) : (
                           <>
                             <label className="agent-field">
@@ -350,7 +445,7 @@ export function AgentSettings({
                               <input
                                 {...textInputProps}
                                 value={agent.runtime.command}
-                                disabled={agent.runtime.distribution === "managed"}
+                                disabled={agent.runtime.protocol === "acp" && agent.runtime.distribution === "managed"}
                                 onChange={(event) => updateRuntime(agent, { command: event.target.value })}
                               />
                             </label>
@@ -359,23 +454,25 @@ export function AgentSettings({
                               <input
                                 {...textInputProps}
                                 value={agent.runtime.args}
-                                disabled={agent.runtime.distribution === "managed"}
+                                disabled={agent.runtime.protocol === "acp" && agent.runtime.distribution === "managed"}
                                 onChange={(event) => updateRuntime(agent, { args: event.target.value })}
                               />
                             </label>
-                            <label className="agent-field">
-                              <span>{t("agents.runtimeDistribution")}</span>
-                              <select
-                                value={agent.runtime.distribution}
-                                onChange={(event) => updateRuntime(agent, { distribution: event.target.value })}
-                              >
-                                <option value="system">{t("agents.runtimeSystem")}</option>
-                                <option value="managed" disabled={agent.id !== "claude" && agent.id !== "codex"}>
-                                  {t("agents.runtimeManaged")}
-                                </option>
-                                <option value="custom">{t("agents.runtimeCustom")}</option>
-                              </select>
-                            </label>
+                            {agent.runtime.protocol === "acp" && (
+                              <label className="agent-field">
+                                <span>{t("agents.runtimeDistribution")}</span>
+                                <select
+                                  value={agent.runtime.distribution}
+                                  onChange={(event) => updateRuntime(agent, { distribution: event.target.value })}
+                                >
+                                  <option value="system">{t("agents.runtimeSystem")}</option>
+                                  <option value="managed" disabled={agent.id !== "claude" && agent.id !== "codex"}>
+                                    {t("agents.runtimeManaged")}
+                                  </option>
+                                  <option value="custom">{t("agents.runtimeCustom")}</option>
+                                </select>
+                              </label>
+                            )}
                             <label className="agent-field">
                               <span>{t("agents.runtimeModels")}</span>
                               <select
