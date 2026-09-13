@@ -262,7 +262,7 @@ class Runtime {
     };
     signal.addEventListener("abort", cancel, { once: true });
     try {
-      const base = botAcpPrompt(text, botIdentity);
+      const base = botAcpPrompt(text, botIdentity, this.agent);
       let prompt: string | ContentBlock[] = base;
       if (images.length) {
         const blocks: ContentBlock[] = typeof base === "string" ? [{ type: "text", text: base }] : base;

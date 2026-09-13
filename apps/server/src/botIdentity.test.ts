@@ -35,3 +35,22 @@ test("runtime slash commands stay intact while file-path requests still receive 
   }
   assert.ok(Array.isArray(botAcpPrompt("/Users/project/file.ts explain this file", identity)));
 });
+
+test("Codex ACP only rewrites the identity-override and greeting lock-down phrases", () => {
+  const identity = { name: "codex", description: "" };
+  const greeting = [
+    "Write the proactive opening greeting for a brand-new chat topic.",
+    "Reply with exactly one short, natural sentence and nothing else: no Markdown, heading, list, quotation marks, or explanation.",
+    "Write in interface.language. Speak as currentBot and let its name, description, and labels shape the wording and personality without mechanically listing them.",
+    "Vary the greeting across topics. Do not default to a generic equivalent of 'What can I do for you?'. Do not call tools or claim that any work has already been done.",
+    "This is a private chat between currentBot and the user.",
+  ].join("\n");
+  const claude = botAcpPrompt(greeting, identity, { id: "claude" });
+  const codex = botAcpPrompt(greeting, identity, { id: "custom", runtime: { args: "-y @agentclientprotocol/codex-acp" } });
+  assert.ok(Array.isArray(claude) && Array.isArray(codex));
+  assert.equal(claude[1].text, greeting);
+  assert.match(claude[0].text, /replace any older Bot name or description/);
+  assert.match(codex[0].text, /Prefer the name and description in this JSON/);
+  assert.doesNotMatch(codex[1].text, /Speak as currentBot|nothing else|Do not call tools/);
+  assert.match(codex[1].text, /Write the proactive opening greeting[\s\S]*private chat between currentBot/);
+});
