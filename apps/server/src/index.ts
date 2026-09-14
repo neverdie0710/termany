@@ -1751,15 +1751,21 @@ async function acpTarget(body: any): Promise<AcpRuntimeTarget> {
   // A folder the user picked explicitly wins over the inherited terminal cwd;
   // if it has since vanished, fail loudly rather than silently landing the
   // agent somewhere else.
-  const requested = body?.cwd ? String(body.cwd) : "";
-  const explicitCwd = requested ? await dirIfValid(requested) : undefined;
-  if (requested && !explicitCwd) throw new Error(`Working folder no longer exists: ${requested}`);
-  const cwd = explicitCwd ?? (await resolveSpawnCwd(body?.cwdFrom ? String(body.cwdFrom) : null, paneId));
+  const rawConnection = body?.connection;
+  const connection = rawConnection?.type === "ssh" && typeof rawConnection.target === "string"
+    ? { type: "ssh" as const, target: rawConnection.target.trim() }
+    : undefined;
+  if (rawConnection && !connection) throw new Error("invalid agent connection");
+  if (connection) sshArgsForConnection(connection.target);
+  const requested = body?.cwd ? String(body.cwd).trim() : "";
+  const explicitCwd = connection ? (requested || ".") : requested ? await dirIfValid(requested) : undefined;
+  if (!connection && requested && !explicitCwd) throw new Error(`Working folder no longer exists: ${requested}`);
+  const cwd = connection ? explicitCwd || "." : explicitCwd ?? (await resolveSpawnCwd(body?.cwdFrom ? String(body.cwdFrom) : null, paneId));
   const config: Record<string, string> = {};
   for (const [key, value] of Object.entries(body?.config ?? {})) {
     if (typeof value === "string") config[String(key)] = value;
   }
-  return { paneId, agentId, cwd, cwdExplicit: Boolean(explicitCwd), config };
+  return { paneId, agentId, cwd, cwdExplicit: Boolean(explicitCwd) && !connection, config, connection };
 }
 
 /**

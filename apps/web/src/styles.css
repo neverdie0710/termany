@@ -1368,6 +1368,38 @@ html.tauri #root {
 .agent-create-name input::placeholder {
   color: var(--fg-dim);
 }
+.agent-create-remote-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin: 2px 8px 4px;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.agent-create-remote-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.agent-create-custom-runtime {
+  margin: -8px 0 12px;
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--border);
+}
+.agent-create-custom-runtime p {
+  margin: 0 8px 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.agent-create-error {
+  margin: 0 8px 12px;
+  color: var(--danger, #dc5b5b);
+  font-size: 12px;
+}
 .agent-create-actions {
   display: flex;
   flex: 0 0 auto;

@@ -769,6 +769,10 @@ export function AgentPane({
   // that terminal's live directory.
   useEffect(() => {
     if (!selectedRuntime) return;
+    if (runtimeOwner.agentConnection?.type === "ssh") {
+      setCwdInfo({ cwd: runtimeOwner.agentCwd || ".", home: "." });
+      return;
+    }
     let live = true;
     const params = new URLSearchParams({ paneId: runtimePaneId });
     if (runtimeOwner.agentCwd) params.set("cwd", runtimeOwner.agentCwd);
@@ -786,7 +790,8 @@ export function AgentPane({
     return () => {
       live = false;
     };
-  }, [selectedRuntime, runtimeOwner.id, runtimeOwner.agentCwd, runtimeOwner.cwdFrom, runtimePaneId, setAgentCwd]);
+  }, [selectedRuntime, runtimeOwner.id, runtimeOwner.agentCwd, runtimeOwner.agentConnection,
+    runtimeOwner.cwdFrom, runtimePaneId, setAgentCwd]);
 
   const options = useMemo(
     () =>
@@ -831,7 +836,7 @@ export function AgentPane({
       configRequestRef.current?.abort();
       configRequestRef.current = null;
     };
-  }, [leaf.id, selectedRuntime, leaf.agentCwd]);
+  }, [leaf.id, selectedRuntime, leaf.agentCwd, leaf.agentConnection]);
 
   /**
    * Ask the pane's session what it offers, optionally setting one selector on
@@ -854,6 +859,7 @@ export function AgentPane({
           agentId: selectedRuntime,
           cwd: runtimeOwner.agentCwd || undefined,
           cwdFrom: cwdCandidates(useStore.getState(), runtimeOwner.id).join(","),
+          connection: runtimeOwner.agentConnection,
           config: acpPicks,
           ...change,
         }),
@@ -875,7 +881,8 @@ export function AgentPane({
         setAcpConfigBusy(false);
       }
     }
-  }, [runtimeOwner.id, runtimeOwner.agentCwd, configPaneId, selectedRuntime, acpPicks, setAgentConfigOption]);
+  }, [runtimeOwner.id, runtimeOwner.agentCwd, runtimeOwner.agentConnection,
+    configPaneId, selectedRuntime, acpPicks, setAgentConfigOption]);
 
   useEffect(() => {
     if (modelSettingsContainer && selectedRuntime && acpConfig === null && !acpConfigError && !streaming) {
@@ -1211,6 +1218,7 @@ export function AgentPane({
                   agentId: replyRuntime,
                   cwd: member ? member.agentCwd || undefined : leaf.agentCwd || undefined,
                   cwdFrom: cwdCandidates(useStore.getState(), member?.id ?? leaf.id).join(","),
+                  connection: member?.agentConnection ?? leaf.agentConnection,
                   config: member ? member.agentConfig?.[replyRuntime] ?? {} : acpPicks,
                   ...(member ? { applySavedConfig: true } : {}),
                   prompt: replyPrompt,
@@ -1455,6 +1463,7 @@ export function AgentPane({
                       config: runtime ? member.agentConfig?.[runtime] ?? {} : undefined,
                       cwd: member.agentCwd || undefined,
                       cwdFrom: cwdCandidates(useStore.getState(), member.id).join(","),
+                      connection: member.agentConnection,
                       images: imageRequestPayload(user.attachments) },
                   };
                 }),
@@ -1602,6 +1611,7 @@ export function AgentPane({
   };
   const pickCwd = async () => {
     if (picking) return;
+    if (leaf.agentConnection?.type === "ssh") return;
     setPicking(true);
     try {
       const response = await fetch(apiPath("/api/agent/acp/pick-cwd"), {

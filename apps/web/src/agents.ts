@@ -262,11 +262,24 @@ export function saveAgentConfigs(agents: AgentConfig[]) {
   const stored = agents.map(storedShape);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
   window.dispatchEvent(new Event(AGENTS_CHANGED_EVENT));
-  void fetch(apiPath("/api/agents"), {
+  void pushAgentConfigs(stored).catch(() => undefined);
+}
+
+async function pushAgentConfigs(stored: StoredAgentConfig[]): Promise<void> {
+  const response = await fetch(apiPath("/api/agents"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ agents: stored }),
-  }).catch(() => undefined);
+  });
+  if (!response.ok) throw new Error((await response.text()) || `request failed (${response.status})`);
+}
+
+/** The create-Bot flow must not expose a Bot before its runtime exists on the server. */
+export async function saveAgentConfigsAndWait(agents: AgentConfig[]): Promise<void> {
+  const stored = agents.map(storedShape);
+  await pushAgentConfigs(stored);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  window.dispatchEvent(new Event(AGENTS_CHANGED_EVENT));
 }
 
 /**

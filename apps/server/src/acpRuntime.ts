@@ -31,6 +31,7 @@ import { prepareManagedAcpLaunch } from "./managedAcp.js";
 import { stopAgentProcess } from "./agentProcess.js";
 import { loadAgentImages, saveAgentOutputImages, type LoadedAgentImage, type StoredAgentImage } from "./agentImages.js";
 import { FastClawRuntime } from "./fastClawRuntime.js";
+import { sshArgsForConnection } from "./ssh.js";
 
 export type AcpRuntimeEvent =
   | { type: "delta"; text: string }
@@ -43,6 +44,11 @@ export type AcpRuntimeEvent =
   | { type: "done"; sessionId: string };
 
 type Emit = (event: AcpRuntimeEvent) => void;
+
+export interface AgentConnection {
+  type: "ssh";
+  target: string;
+}
 
 function splitArgs(input: string): string[] {
   const args: string[] = [];
@@ -71,6 +77,36 @@ function splitArgs(input: string): string[] {
   if (quote) throw new Error("Unclosed quote in runtime arguments");
   if (current) args.push(current);
   return args;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function remoteRuntimeCommand(agent: AgentConfig, command: string, args: string): { command: string; args: string[] } {
+  const managed: Record<string, string> = {
+    claude: "@agentclientprotocol/claude-agent-acp",
+    codex: "@agentclientprotocol/codex-acp",
+  };
+  const packageName = managed[agent.id];
+  return packageName
+    ? { command: "npx", args: ["-y", packageName] }
+    : { command, args: splitArgs(args) };
+}
+
+export function remoteAcpLaunch(agent: AgentConfig, cwd: string, connection: AgentConnection) {
+  const spec = agent.runtime;
+  if (!spec || spec.protocol !== "acp") throw new Error(`${agent.name} has no stdio ACP runtime configured`);
+  const remote = remoteRuntimeCommand(agent, spec.command, spec.args);
+  const remoteCommand = [remote.command, ...remote.args].map(shellQuote).join(" ");
+  const remoteScript = `cd ${shellQuote(cwd)} && exec ${remoteCommand}`;
+  const sshArgs = sshArgsForConnection(connection.target);
+  const destination = sshArgs.pop();
+  if (!destination) throw new Error("SSH destination is required");
+  return {
+    command: "ssh",
+    args: [...sshArgs, "-T", "-o", "BatchMode=yes", destination, `sh -lc ${shellQuote(remoteScript)}`],
+  };
 }
 
 async function executablePath(command: string): Promise<string> {
@@ -164,7 +200,8 @@ class Runtime {
     private session: ActiveSession,
     private readonly compatibility: AcpConfigCompatibility,
     private readonly supportsImagePrompts: boolean,
-    private readonly supportsSessionLoad: boolean
+    private readonly supportsSessionLoad: boolean,
+    readonly executionConnection?: AgentConnection
   ) {
     this.configOptions = session.newSessionResponse.configOptions ?? [];
     rememberConfig(agent.id, this.configOptions);
@@ -180,7 +217,8 @@ class Runtime {
     });
   }
 
-  static async create(paneId: string, agent: AgentConfig, cwd: string, saved?: SuspendedRuntime): Promise<Runtime> {
+  static async create(paneId: string, agent: AgentConfig, cwd: string, saved?: SuspendedRuntime,
+    remoteConnection?: AgentConnection): Promise<Runtime> {
     const spec = agent.runtime;
     if (!spec || spec.protocol !== "acp") throw new Error(`${agent.name} has no ACP runtime configured`);
     if (spec.modelSource === "termany") {
@@ -192,7 +230,9 @@ class Runtime {
     let env = subscriptionEnvironment(agentEnvironment(await spawnEnvironment()), agent);
     let command: string;
     let args: string[];
-    if (spec.distribution === "managed") {
+    if (remoteConnection?.type === "ssh") {
+      ({ command, args } = remoteAcpLaunch(agent, cwd, remoteConnection));
+    } else if (spec.distribution === "managed") {
       const launch = await prepareManagedAcpLaunch(agent, env, splitArgs(spec.args));
       command = launch.command;
       args = launch.args;
@@ -201,14 +241,14 @@ class Runtime {
       command = await executablePath(spec.command);
       args = splitArgs(spec.args);
     }
-    await checkGeminiAuthSupport(agent, env);
-    await checkNativeAcpSupport(agent, command, env);
+    if (!remoteConnection) await checkGeminiAuthSupport(agent, env);
+    if (!remoteConnection) await checkNativeAcpSupport(agent, command, env);
     const dropped = overriddenCredentials(agent).filter((name) => name in process.env);
     if (dropped.length) {
       console.log(`[termany] ${agent.name}: using its own login, ignoring ${dropped.join(", ")}`);
     }
     const child = spawn(command, args, {
-      cwd,
+      cwd: remoteConnection ? os.homedir() : cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -261,7 +301,7 @@ class Runtime {
       }
       runtime = new Runtime(paneId, agent, cwd, child, connection, session, compatibility,
         initialization.agentCapabilities?.promptCapabilities?.image === true,
-        initialization.agentCapabilities?.loadSession === true);
+        initialization.agentCapabilities?.loadSession === true, remoteConnection);
       runtime.hasPrompted = Boolean(saved?.sessionId);
       return runtime;
     } catch (error) {
@@ -429,6 +469,7 @@ class Runtime {
     return {
       agent: this.agent, cwd: this.cwd, config: this.configOptions,
       sessionId: this.hasPrompted ? this.session.sessionId : undefined,
+      connection: this.executionConnection,
     };
   }
 
@@ -536,6 +577,7 @@ interface SuspendedRuntime {
   cwd: string;
   config: SessionConfigOption[];
   sessionId?: string;
+  connection?: AgentConnection;
 }
 const suspended = new Map<string, SuspendedRuntime>();
 const starting = new Map<string, Promise<RuntimeHandle>>();
@@ -605,6 +647,7 @@ export interface AcpRuntimeTarget {
   /** The pane's remembered selector picks, keyed by config id. Re-applied to
    *  every session this pane starts. */
   config?: Record<string, string>;
+  connection?: AgentConnection;
 }
 
 /**
@@ -626,9 +669,13 @@ async function acquire(input: AcpRuntimeTarget): Promise<RuntimeHandle> {
   const agent = findAgentConfig(input.agentId);
   if (!agent?.runtime) throw new Error("Agent conversation runtime is missing or disabled");
   const previous = runtimes.get(input.paneId) ?? suspended.get(input.paneId);
+  const previousConnection = previous instanceof Runtime
+    ? previous.executionConnection
+    : (previous as SuspendedRuntime | undefined)?.connection;
   const changed = previous && (previous.agent.id !== input.agentId ||
     JSON.stringify(previous.agent.runtime) !== JSON.stringify(agent.runtime) ||
-    (input.cwdExplicit && previous.cwd !== input.cwd));
+    (input.cwdExplicit && previous.cwd !== input.cwd) ||
+    JSON.stringify(previousConnection) !== JSON.stringify(input.connection));
   if (changed) {
     const live = runtimes.get(input.paneId);
     if (live && usage.get(live)?.active) throw new Error("This agent is already responding");
@@ -641,7 +688,7 @@ async function acquire(input: AcpRuntimeTarget): Promise<RuntimeHandle> {
   const promise: Promise<RuntimeHandle> = (async () => {
     const runtime = agent.runtime?.protocol === "acp-http"
       ? await FastClawRuntime.create(input.paneId, agent, cwd)
-      : await Runtime.create(input.paneId, agent, cwd, saved);
+      : await Runtime.create(input.paneId, agent, cwd, saved, input.connection ?? saved?.connection);
     try {
       if (starting.get(input.paneId) !== promise) throw new Error("Agent conversation was closed during startup");
       const picks = saved ? Object.fromEntries(saved.config.map((option) => [option.id, String(option.currentValue)])) : {};

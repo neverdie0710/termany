@@ -1,6 +1,7 @@
 import { textInputProps } from "../textInputProps";
 import { isAgentAvailableForBot } from "../agentAvailability";
 import { botNameAfterAgentSelection } from "../agentBotName";
+import { apiPath } from "../api";
 import {
   PointerEvent as ReactPointerEvent,
   useCallback,
@@ -14,7 +15,8 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { UserRound } from "lucide-react";
-import { agentCommand, detectAgentConfigs, useAgentConfigs, type AgentConfig } from "../agents";
+import { agentCommand, createCustomAgent, detectAgentConfigs, loadAgentConfigs,
+  saveAgentConfigsAndWait, useAgentConfigs, type AgentConfig } from "../agents";
 import termanyIcon from "../assets/agents/termany.png?url";
 import { compareConversationActivity, lastConversationTime } from "../agentConversationOrder";
 import { compareConversationOrganization, conversationMoveUpdates } from "../agentConversationOrganization";
@@ -72,6 +74,7 @@ function relativeTime(at: number, now: number, t: ReturnType<typeof useI18n>["t"
  *  stores the bot with an empty runtime — the pane's existing Chat mode. */
 const TERMANY_RUNTIME_ID = "termany";
 const TERMANY_RUNTIME_NAME = "Termany";
+const CUSTOM_RUNTIME_ID = "__custom_agent__";
 
 function displayTitle(conversation: AgentConversation, t: ReturnType<typeof useI18n>["t"]): string {
   return ["New agent", "New conversation", "New bot"].includes(conversation.title)
@@ -160,6 +163,13 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   );
   const [composerName, setComposerName] = useState("");
   const [composerRuntime, setComposerRuntime] = useState("");
+  const [remoteEnabled, setRemoteEnabled] = useState(false);
+  const [remoteTarget, setRemoteTarget] = useState("");
+  const [remoteCwd, setRemoteCwd] = useState("");
+  const [customRuntimeCommand, setCustomRuntimeCommand] = useState("");
+  const [customRuntimeArgs, setCustomRuntimeArgs] = useState("");
+  const [createError, setCreateError] = useState("");
+  const [sshConnections, setSshConnections] = useState<Array<{ target: string; label?: string }>>([]);
   const [runtimeSelectOpen, setRuntimeSelectOpen] = useState(false);
   const [runtimeSelectIndex, setRuntimeSelectIndex] = useState(0);
   const [runtimeSelectMenuPosition, setRuntimeSelectMenuPosition] = useState<{
@@ -252,29 +262,40 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   const runtimeChoices = useMemo(
     () =>
       [
-        ...(termanyModel ? [{
+        {
+          id: CUSTOM_RUNTIME_ID,
+          name: t("agents.addTitle"),
+          icon: undefined,
+          hint: t("agents.runtimeHelp"),
+        },
+        ...(termanyModel && !remoteEnabled ? [{
           id: TERMANY_RUNTIME_ID,
           name: TERMANY_RUNTIME_NAME,
           icon: termanyIcon,
           hint: termanyModel as string | undefined,
         }] : []),
-        ...(detectedRuntimes ?? [])
-          .filter(isAgentAvailableForBot)
+        ...((remoteEnabled ? configuredRuntimes : (detectedRuntimes ?? []))
+          .filter((agent) => remoteEnabled
+            ? agent.enabled && agent.runtime?.protocol === "acp"
+            : isAgentAvailableForBot(agent))
           .map((agent) => ({
             id: agent.id,
             name: agent.name,
             icon: agent.icon,
             hint: agent.detectedPath ?? agentCommand(agent),
-          })),
-      ].sort((a, b) => a.name.localeCompare(b.name, "en", { sensitivity: "base", numeric: true })),
-    [detectedRuntimes, termanyModel]
+          }))),
+      ].sort((a, b) => a.id === CUSTOM_RUNTIME_ID ? -1 : b.id === CUSTOM_RUNTIME_ID ? 1
+        : a.name.localeCompare(b.name, "en", { sensitivity: "base", numeric: true })),
+    [configuredRuntimes, detectedRuntimes, remoteEnabled, t, termanyModel]
   );
 
   const composerRuntimeAvailable = runtimeChoices.some((choice) => choice.id === composerRuntime);
   const composerRuntimeChoice = runtimeChoices.find((choice) => choice.id === composerRuntime);
   const selectComposerRuntime = (choice: (typeof runtimeChoices)[number]) => {
     setComposerRuntime(choice.id);
-    setComposerName((current) => botNameAfterAgentSelection(current, choice.name));
+    if (choice.id !== CUSTOM_RUNTIME_ID) {
+      setComposerName((current) => botNameAfterAgentSelection(current, choice.name));
+    }
     setRuntimeSelectOpen(false);
     requestAnimationFrame(() => composerNameInputRef.current?.focus({ preventScroll: true }));
   };
@@ -363,6 +384,20 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
       live = false;
     };
   }, [dialogStage]);
+
+  useEffect(() => {
+    if (dialogStage !== "create" || !remoteEnabled) return;
+    let live = true;
+    void fetch(apiPath("/api/ssh/connections"))
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data) => {
+        if (live) setSshConnections(Array.isArray(data.connections) ? data.connections : []);
+      })
+      .catch(() => {
+        if (live) setSshConnections([]);
+      });
+    return () => { live = false; };
+  }, [dialogStage, remoteEnabled]);
 
   const runtimeSignature = configuredRuntimes
     .map((agent) => `${agent.id}:${agent.enabled}:${agentCommand(agent)}:${JSON.stringify(agent.runtime)}`)
@@ -635,14 +670,50 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
     setVisibleTopicCount(TOPIC_PAGE_SIZE);
   }, [active?.id]);
 
-  const createConversation = (runtimeId: string, title: string) => {
+  const createConversation = async (runtimeId: string, title: string) => {
     const name = title.trim();
     if (!runtimeId || !name) return;
-    const created = addConversation(runtimeId === TERMANY_RUNTIME_ID ? "" : runtimeId, name);
+    let savedRuntimeId = runtimeId;
+    if (runtimeId === CUSTOM_RUNTIME_ID) {
+      const command = customRuntimeCommand.trim();
+      if (!command) return;
+      const agent = {
+        ...createCustomAgent(),
+        name,
+        command,
+        args: customRuntimeArgs.trim(),
+        enabled: true,
+        runtime: {
+          protocol: "acp" as const,
+          command,
+          args: customRuntimeArgs.trim(),
+          distribution: "custom" as const,
+          modelSource: "agent" as const,
+        },
+      };
+      try {
+        await saveAgentConfigsAndWait([agent, ...loadAgentConfigs()]);
+      } catch (error) {
+        setCreateError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      savedRuntimeId = agent.id;
+    }
+    const created = addConversation(savedRuntimeId === TERMANY_RUNTIME_ID ? "" : savedRuntimeId, name);
+    if (remoteEnabled && remoteTarget.trim()) {
+      useStore.getState().setAgentConnection(created, { type: "ssh", target: remoteTarget.trim() });
+      if (remoteCwd.trim()) useStore.getState().setAgentCwd(created, remoteCwd.trim());
+    }
     setActiveId(created);
     setQuery("");
     setComposerName("");
     setComposerRuntime("");
+    setRemoteEnabled(false);
+    setRemoteTarget("");
+    setRemoteCwd("");
+    setCustomRuntimeCommand("");
+    setCustomRuntimeArgs("");
+    setCreateError("");
     setDialogStage(null);
     setInspectorOpen(false);
   };
@@ -654,6 +725,12 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
   const openCreateDialog = () => {
     setComposerName("");
     setComposerRuntime("");
+    setRemoteEnabled(false);
+    setRemoteTarget("");
+    setRemoteCwd("");
+    setCustomRuntimeCommand("");
+    setCustomRuntimeArgs("");
+    setCreateError("");
     setRuntimeSelectOpen(false);
     setDialogStage("create");
   };
@@ -662,8 +739,9 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
 
   const submitConversation = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!composerRuntimeAvailable) return;
-    createConversation(composerRuntime, composerName);
+    if (!composerRuntimeAvailable || (remoteEnabled && !remoteTarget.trim()) ||
+      (composerRuntime === CUSTOM_RUNTIME_ID && !customRuntimeCommand.trim())) return;
+    void createConversation(composerRuntime, composerName);
   };
 
   const openRuntimeSettings = (agentId?: string) => {
@@ -2016,6 +2094,46 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
                   />
                 </label>
 
+                <label className="agent-create-remote-toggle">
+                  <input
+                    type="checkbox"
+                    checked={remoteEnabled}
+                    onChange={(event) => {
+                      setRemoteEnabled(event.target.checked);
+                      setComposerRuntime("");
+                    }}
+                  />
+                  <span>{t("ssh.managerTitle")}</span>
+                </label>
+                {remoteEnabled && (
+                  <>
+                    <label className="agent-create-name">
+                      <span>{t("ssh.managerTitle")}</span>
+                      <input
+                        {...textInputProps}
+                        list="agent-ssh-connections"
+                        value={remoteTarget}
+                        placeholder="profile:... or user@host"
+                        onChange={(event) => setRemoteTarget(event.target.value)}
+                      />
+                      <datalist id="agent-ssh-connections">
+                        {sshConnections.map((connection) => (
+                          <option key={connection.target} value={connection.target} label={connection.label ?? connection.target} />
+                        ))}
+                      </datalist>
+                    </label>
+                    <label className="agent-create-name">
+                      <span>{t("agentChat.cwd")}</span>
+                      <input
+                        {...textInputProps}
+                        value={remoteCwd}
+                        placeholder="~"
+                        onChange={(event) => setRemoteCwd(event.target.value)}
+                      />
+                    </label>
+                  </>
+                )}
+
                 <fieldset className="agent-runtime-fieldset">
                   <legend>
                     <span className="agent-runtime-legend">
@@ -2111,6 +2229,33 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
                     )}
                   </div>
                 </fieldset>
+                {composerRuntime === CUSTOM_RUNTIME_ID && (
+                  <section className="agent-create-custom-runtime">
+                    <label className="agent-create-name">
+                      <span>{t("agents.runtimeCommand")}</span>
+                      <input
+                        {...textInputProps}
+                        value={customRuntimeCommand}
+                        placeholder="/path/to/agent-acp"
+                        onChange={(event) => {
+                          setCustomRuntimeCommand(event.target.value);
+                          setCreateError("");
+                        }}
+                      />
+                    </label>
+                    <label className="agent-create-name">
+                      <span>{t("agents.runtimeArgs")}</span>
+                      <input
+                        {...textInputProps}
+                        value={customRuntimeArgs}
+                        placeholder="serve --stdio"
+                        onChange={(event) => setCustomRuntimeArgs(event.target.value)}
+                      />
+                    </label>
+                    <p>{t("agents.runtimeHelp")}</p>
+                  </section>
+                )}
+                {createError && <div className="agent-create-error" role="alert">{createError}</div>}
               </div>
               <div className="agent-create-actions">
                 <button
@@ -2123,7 +2268,9 @@ export function AgentWorkspace({ workspaceId, visible = true }: { workspaceId: s
                 <button
                   type="submit"
                   className="agent-create-submit"
-                  disabled={!composerRuntimeAvailable || !composerName.trim()}
+                  disabled={!composerRuntimeAvailable || !composerName.trim() ||
+                    (remoteEnabled && !remoteTarget.trim()) ||
+                    (composerRuntime === CUSTOM_RUNTIME_ID && !customRuntimeCommand.trim())}
                 >
                   {t("workspace.create")}
                 </button>

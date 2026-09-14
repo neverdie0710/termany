@@ -76,6 +76,11 @@ export interface AgentFileAttachment {
   name: string;
 }
 
+export interface AgentConnection {
+  type: "ssh";
+  target: string;
+}
+
 export interface AgentBotDelivery {
   id: string;
   recipient: { id: string; name: string };
@@ -178,6 +183,7 @@ export type Pane =
       /** Working folder the user picked explicitly for the ACP agent. Unset
        *  inherits the source terminal's live cwd (via cwdFrom). */
       agentCwd?: string;
+      agentConnection?: AgentConnection;
     }
   | {
       kind: "split";
@@ -458,6 +464,7 @@ interface State {
   setAgentConfigOption: (leafId: string, agentId: string, configId: string, value: string) => void;
   setAgentRuntime: (leafId: string, runtimeId: string) => void;
   setAgentCwd: (leafId: string, cwd: string) => void;
+  setAgentConnection: (leafId: string, connection?: AgentConnection) => void;
   /** Toggle a pane's body between its terminal and a file-tree browser. */
   togglePaneView: (leafId: string) => void;
   /** Set a pane's body explicitly. */
@@ -2095,6 +2102,18 @@ export const useStore = create<State>((set, get) => ({
       agentConversations: updateAgentConversation(s.agentConversations, leafId, (leaf) => ({
         ...leaf,
         agentCwd: cwd || undefined,
+      })),
+    })),
+
+  setAgentConnection: (leafId, connection) =>
+    set((s) => ({
+      workspaces: updateLeafEverywhere(s.workspaces, leafId, (leaf) => ({
+        ...leaf,
+        agentConnection: connection,
+      })),
+      agentConversations: updateAgentConversation(s.agentConversations, leafId, (leaf) => ({
+        ...leaf,
+        agentConnection: connection,
       })),
     })),
 

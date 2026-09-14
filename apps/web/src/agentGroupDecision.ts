@@ -1,5 +1,5 @@
 import { groupDecisionPrompt, validateGroupDecision, type AgentGroup, type GroupDecision, type GroupDecisionContext } from "./agentGroupChat";
-import type { AgentConversation } from "./state/store";
+import type { AgentConnection, AgentConversation } from "./state/store";
 
 export interface GroupDecisionTarget {
   paneId: string;
@@ -9,6 +9,7 @@ export interface GroupDecisionTarget {
   cwdFrom?: string;
   config?: Record<string, string>;
   images?: { path: string; mimeType: string }[];
+  connection?: AgentConnection;
 }
 
 export interface GroupDecisionCandidate {
